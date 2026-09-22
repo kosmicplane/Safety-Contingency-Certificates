@@ -1,902 +1,530 @@
 # Safety & Contingency Certificates for Autonomous Landing
 
 <p align="center">
-  <strong>Poisson safety fields · HOCBF collision avoidance · CLF landing stabilization · multi-zone contingency · verified minimum-intervention filtering</strong>
+  <strong>MPC · Poisson safety fields · HOCBFs · CLFs · obstacle-limited ellipsoidal funnels · r-out-of-p contingency · hardware validation</strong>
 </p>
 
 <p align="center">
-  A modular research framework for converting complex three-dimensional occupancy geometry into differentiable safety certificates and safe landing commands for a reduced-order aerial vehicle.
+  <img src="docs/assets/readme/methodology_overview.png" alt="Safety and contingency methodology" width="920">
 </p>
 
-<p align="center">
-  <img src="docs/assets/readme/methodology_overview.png" alt="End-to-end methodology overview" width="920">
-</p>
+## Research question
 
-> **Current scope.** The paper experiments use deterministic three-dimensional single- and double-integrator models with known state, static occupancy, and ideal low-level command tracking. The repository does **not** yet claim full-order PX4, estimator, hardware, uncertain-terrain, or Martian-aerodynamics guarantees.
+**How can an aerial vehicle pursue a nominal landing objective while preserving multiple feasible alternatives when obstacles, target availability, or mission conditions change?**
 
-## Research context
+The framework separates nominal task execution from safety and contingency. A predictive controller generates the nominal command; environmental safety is enforced through differentiable barrier constraints; target convergence is described through Lyapunov functions; and contingency logic tracks whether enough alternative landing regions remain viable.
 
-The repository contains the formal reduced-order safety and contingency framework used in the current paper experiments. Related hardware and dynamic-environment demonstrations are presented later as **experimental context**, separately from the guarantees supported by the deterministic software suite.
+The Caltech SURF formulation combines four ideas:
+
+1. **MPC** for the nominal task command;
+2. **Poisson/PDE safety fields + HOCBF constraints** for obstacle avoidance;
+3. **CLF-derived regions of attraction** for landing stabilization;
+4. **overlapping ellipsoidal funnels and r-out-of-p certificates** for safe route construction and contingency preservation.
+
+> **Current claim boundary.** The reduced-order mathematical framework and deterministic simulation suite are more mature than the full hardware theory. Crazyflie experiments demonstrate implementation behavior, but formal guarantees for the complete sampled-data, perception, low-level-flight, and dynamic-obstacle stack remain ongoing.
 
 ---
 
-## 1. Research objective
-
-A planetary aerial vehicle must do more than avoid an obstacle. It must descend through cluttered terrain, converge to a landing equilibrium, retain viable backup sites, retarget when the active site becomes unavailable, and stop when the configured contingency requirement can no longer be supported.
-
-This repository studies the coupled problem
-
-$$
-\text{environment geometry}
-\longrightarrow\
-\text{smooth environmental safety}
-\longrightarrow\
-\text{landing stabilization}
-\longrightarrow\
-\text{multi-zone contingency}
-\longrightarrow\
-\text{verified safe command}.
-$$
-
-The implementation separates each mathematical responsibility into a **safety box** with explicit inputs, outputs, tests, and diagnostic residuals.
-
-| Requirement | Mathematical object | Owning package |
-|---|---|---|
-| Complex obstacle geometry | occupancy domain $\Omega$ and boundary $\partial\Omega$ | `poisson_safety_box` |
-| Smooth environmental certificate | Poisson safety function $h_P$ | `poisson_safety_box` |
-| Dynamic collision avoidance | CBF/HOCBF inequality | `cbf_safety_box` |
-| Landing convergence | target-specific CLF $V_j$ | `clf_safety_box` |
-| Candidate attraction region | sublevel set $\mathcal R_j(c_j)$ | `clf_safety_box` |
-| Backup-site logic | $r$-out-of-$p$ pivot $\widetilde h_r$ | `contingency_safety_box` |
-| Minimum intervention | constrained projection of $u_{\mathrm{nom}}$ | `safety_filter_box` |
-| Shared contracts | states, certificates, decisions, constraints, results | `safety_box_core` |
-
----
-
-## 2. System architecture
+## 1. System architecture
 
 ```mermaid
 flowchart LR
-    A[World geometry or perception] --> B[Metric occupancy and inflation]
-    B --> C[Free domain Ω and Dirichlet boundary ∂Ω]
-    C --> D[Poisson safety box]
-    D --> E[hP, DhP, D²hP]
+    W[Occupancy / obstacle geometry] --> P[Poisson safety field]
+    P --> H[HOCBF constraint]
 
-    F[Mission planner or external controller] --> G[u_nom]
-    H[Landing equilibria] --> I[CLF safety box]
-    I --> J[Vj and hROA,j]
-    J --> K[Contingency safety box]
-    K --> L[r-out-of-p affine rows]
+    T[Landing targets] --> C[CLF certificates]
+    C --> R[Candidate ROAs]
+    R --> G[Ellipsoidal funnel / route graph]
+    R --> O[r-out-of-p contingency]
 
-    E --> M[CBF/HOCBF safety box]
-    M --> N[Environmental affine row]
-    G --> O[Unified safety filter]
-    N --> O
-    I --> O
-    L --> O
-    O --> P[u_safe]
+    M[Nominal MPC] --> U[u_nom]
+    H --> Q[Minimum-intervention QP]
+    C --> Q
+    O --> Q
+    G --> Q
+    U --> Q
+    Q --> S[u_safe]
+    S --> X[Simulation / Crazyflie experiment]
 ```
 
-The nominal planner is intentionally separate from the certificate layers. A planner may improve progress, but formal environmental safety is represented by the Poisson-HOCBF row, while landing stabilization and contingency are represented by CLF-derived rows.
+The boxes are intentionally modular: geometry, stabilization, contingency, and command filtering are evaluated separately before being coupled.
 
 ---
 
-# Approach
+## 2. Reduced-order dynamics and nominal MPC
 
-## 3. Reduced-order vehicle model
+The principal translational model is
 
-The main paper experiments use a three-dimensional double integrator:
-
-$$
-\dot p=v, \qquad \dot v=a,
-$$
-
-with
-
-$$
-x=
+```math
+x =
 \begin{bmatrix}
-p\\ v
-\end{bmatrix}
-\in\mathbb R^6,
+p \\
+v
+\end{bmatrix},
 \qquad
-u=a\in\mathbb R^3.
-$$
+\dot p = v,
+\qquad
+\dot v = a,
+\qquad
+u=a.
+```
 
-The generic safety-box contracts remain compatible with a control-affine system
+For a finite prediction horizon, the nominal MPC solves a constrained tracking problem of the form
 
-$$
-\dot x=f(x)+g(x)u.
-$$
+```math
+\min_{u_{0:N-1}}
+\sum_{k=0}^{N-1}
+\left[
+(x_k-x_k^{\mathrm{ref}})^\mathsf{T}Q(x_k-x_k^{\mathrm{ref}})
++
+(u_k-u_k^{\mathrm{ref}})^\mathsf{T}R(u_k-u_k^{\mathrm{ref}})
+\right]
++
+(x_N-x_N^{\mathrm{ref}})^\mathsf{T}Q_f(x_N-x_N^{\mathrm{ref}})
+```
 
-This separation allows the environment and contingency layers to remain unchanged when the reduced-order model is replaced.
+subject to the discrete dynamics and state/input bounds. Only the first optimal control is applied before the problem is solved again.
 
-**Implementation:** `experiments/common/simulation.py`, `clf_safety_box/src/clf_safety_box/models.py`.
+The command leaving the nominal layer is denoted
+
+```math
+u_{\mathrm{nom}} = u_0^\star.
+```
+
+This is the task-seeking command **before** any safety or contingency correction.
 
 ---
 
-## 4. Occupancy-to-Poisson safety synthesis
+## 3. Poisson safety field
 
-### 4.1 Domain construction
+A metric occupancy map defines the free domain `Omega`; obstacle and workspace surfaces define its boundary.
 
-A metric occupancy tensor $O$ is generated from the analytic world, an image, or a video stream. Obstacle inflation accounts for the vehicle footprint and configured perception margin. Free cells induce the open computational domain $\Omega$; obstacle surfaces and the outer workspace boundary induce $\partial\Omega$.
+The continuous safety-field construction is based on
 
-### 4.2 Dirichlet problem
-
-The Poisson box solves
-
-$$
-\begin{cases}
-\Delta h_P(y)=f_P(y), & y\in\Omega,\\
-h_P(y)=0, & y\in\partial\Omega,
-\end{cases}
-$$
-
-where $f_P(y)<0$ is a configurable forcing function. The solution provides
-
-$$
-h_P(y), \qquad D h_P(y), \qquad D^2 h_P(y).
-$$
-
-The boundary encodes obstacle geometry; the forcing function shapes the interior safety landscape and its derivatives.
-
-Supported forcing methods:
-
-```text
-constant
-distance
-average_flux
-guidance
+```math
+\Delta h_P(y)=f_P(y),
+\qquad y\in\Omega,
 ```
 
-Supported solvers:
+with Dirichlet condition
 
-```text
-sparse_direct
-conjugate_gradient
-sor
+```math
+h_P(y)=0,
+\qquad y\in\partial\Omega.
 ```
+
+With a negative interior forcing under the regularity assumptions used by the continuous problem, the Poisson solution is positive in the free-space interior and approaches zero at the boundary. Numerically, the repository evaluates the scalar field together with its first and second spatial derivatives.
 
 <p align="center">
-  <img src="docs/assets/readme/poisson_construction.png" alt="Poisson forcing and derivative diagnostics" width="900">
+  <img src="docs/assets/readme/poisson_construction.png" alt="Poisson field construction and derivative diagnostics" width="900">
 </p>
 
-The implementation reports the assembled-system residual, reconstructed finite-difference residual, field error against a reference solver, derivative timing, and total wall time. This distinguishes PDE discretization error from linear-solver error.
-
-**Implementation:** `poisson_safety_box/`, `experiments/common/poisson_field.py`.
+The important engineering distinction is that the **continuous PDE result** and the **sampled/interpolated grid object** are not automatically equivalent. The numerical implementation therefore exposes solver residuals, interpolation checks, collision guards, and derivative diagnostics instead of treating the field alone as a complete proof.
 
 ---
 
-## 5. Environmental HOCBF
+## 4. Relative-degree-two HOCBF
 
-For a spatial safety function $h_P(p)$ and the double-integrator model,
+For the double-integrator model, a spatial safety function does not depend on acceleration at first derivative:
 
-$$
-\dot h_P=D h_P(p)v,
-$$
+```math
+\dot h_e
+=
+D h_e(p)\,v.
+```
 
-$$
-\ddot h_P=D h_P(p)a+v^\top D^2h_P(p)v.
-$$
+The control appears at second derivative:
 
-Using linear class-$\mathcal K$ gains $\gamma_1,\gamma_2>0$, the relative-degree-two environmental constraint is
+```math
+\ddot h_e
+=
+D h_e(p)\,a
++
+v^\mathsf{T}D^2h_e(p)v.
+```
 
-$$
-D h_P(p)a
-+v^\top D^2h_P(p)v
-+(\gamma_1+\gamma_2)D h_P(p)v
-+\gamma_1\gamma_2h_P(p)
+Using linear extended-class-K gains `gamma_1` and `gamma_2`, the implemented HOCBF inequality is
+
+```math
+D h_e\,a
++
+v^\mathsf{T}D^2h_e\,v
++
+(\gamma_1+\gamma_2)D h_e\,v
++
+\gamma_1\gamma_2 h_e
 \ge 0.
-$$
+```
 
-Equivalently, the acceleration decision must satisfy
+This equation is the explicit bridge between the Poisson field and the acceleration-level safety filter: the field provides the value, gradient, and curvature terms needed by the affine control constraint.
 
-$$
-D h_P(p)a
-\ge
--v^\top D^2h_P(p)v
--(\gamma_1+\gamma_2)D h_P(p)v
--\gamma_1\gamma_2h_P(p).
-$$
-
-The CBF package receives a local sample $(h_P,Dh_P,D^2h_P)$ and returns an affine constraint row. It does not own the Poisson solve or the mission objective.
-
-**Implementation:** `cbf_safety_box/cbf_safety_box/constraints/acceleration_hocbf.py`.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/poisson-hardware-3obs.webp" width="760" alt="Poisson safety field with hardware obstacle configuration">
+</p>
 
 ---
 
-## 6. Landing CLFs
+## 5. CLF landing certificates
 
-Each landing site $j$ defines a controlled equilibrium
+For landing target `j`, define the equilibrium `x_j_star` and error `e_j = x - x_j_star`. A quadratic CLF is
 
-$$
-x_j^\star=
-\begin{bmatrix}
-p_j^\star\\ 0
-\end{bmatrix}.
-$$
+```math
+V_j(x)
+=
+e_j^\mathsf{T}P_j e_j,
+\qquad
+P_j \succ 0.
+```
 
-For the error $e_j=x-x_j^\star$, a stabilizing feedback gain $K_j$ defines
+The candidate attraction region is represented by the sublevel set
 
-$$
-A_{\mathrm{cl},j}=A-BK_j.
-$$
+```math
+\mathcal R_j(c_j)
+=
+\left\{
+x:
+V_j(x)\le c_j
+\right\}.
+```
 
-Given $Q_j\succ0$, the CLF box solves
+Equivalently, define the reachability margin
 
-$$
-A_{\mathrm{cl},j}^\top P_j+P_jA_{\mathrm{cl},j}=-Q_j
-$$
+```math
+h_j^{\mathrm{ROA}}(x)
+=
+c_j - V_j(x).
+```
 
-and constructs
+Then
 
-$$
-V_j(x)=e_j^\top P_je_j.
-$$
-
-The active landing target is regulated through
-
-$$
-L_fV_j(x)+L_gV_j(x)u
-\le
--\alpha_{V,j}\!\left(V_j(x)\right)+\delta_V,
-$$
-
-where $\delta_V\ge0$ is an explicitly penalized stability relaxation. Environmental safety and contingency rows remain hard constraints.
+```math
+h_j^{\mathrm{ROA}}(x)\ge0
+\quad\Longleftrightarrow\quad
+x\in\mathcal R_j(c_j).
+```
 
 <p align="center">
   <img src="docs/assets/readme/clf_regions_of_attraction.png" alt="CLF regions of attraction" width="820">
 </p>
 
-**Implementation:** `clf_safety_box/src/clf_safety_box/`.
+A positive margin means that the current reduced-order state lies inside the corresponding candidate CLF sublevel set. It does **not** by itself prove environmental safety, full-order feasibility, or tracking performance.
 
-## 7. Candidate attraction regions and contingency
+---
 
-For each candidate landing site $j\in\{1,\ldots,p\}$, the corresponding local Control Lyapunov Function defines a candidate attraction region through the sublevel set
+# 6. Obstacle-limited ellipsoidal funnels
+
+The funnel construction is the core geometric extension used to connect local CLF regions into a route.
+
+A local quadratic certificate around node `k` is
 
 ```math
-\mathcal{R}_j(c_j)
+V_k(x)
 =
+(x-x_k^\star)^\mathsf{T}
+P_k
+(x-x_k^\star),
+\qquad
+P_k\succ0.
+```
+
+The admissible level is clipped by three independent limits:
+
+```math
+c_k^{\mathrm{dyn}}
+=
+\sup
 \left\{
-x\in\mathbb{R}^{n}
-\mid
-V_j(x)\leq c_j
+c>0:
+\forall x,\ 0<V_k(x)\le c,
+\ \exists u\in\mathcal U
+\text{ such that }
+L_fV_k+L_gV_k u
+\le
+-\alpha_k(V_k)
 \right\},
 ```
 
-where $c_j>0$ determines the size of the CLF sublevel set associated with the equilibrium $x_j^\star$.
-
-The same region can be represented as the zero-superlevel set of the certificate
-
 ```math
-h_j^{\mathrm{ROA}}(x)
+c_k^{\mathrm{obs}}
 =
-c_j-V_j(x).
-```
-
-Therefore,
-
-```math
-h_j^{\mathrm{ROA}}(x)\geq 0
-\quad\Longleftrightarrow\quad
-x\in\mathcal{R}_j(c_j).
-```
-
-A positive value of $h_j^{\mathrm{ROA}}$ indicates that the current state lies inside the candidate CLF sublevel set. A negative value indicates that the state lies outside that region.
-
-### 7.1 Combinatorial contingency requirement
-
-Assume that the mission contains $p$ candidate landing zones and requires at least $r$ of them to remain certified. The candidate certificate values are
-
-```math
-\left\{
-h_1^{\mathrm{ROA}}(x),
-h_2^{\mathrm{ROA}}(x),
-\ldots,
-h_p^{\mathrm{ROA}}(x)
-\right\}.
-```
-
-Define the combinatorial pivot as
-
-```math
-\widetilde{h}_r(x)
+\inf_{y\in\mathcal C}V_k(y),
+\qquad
+c_k^{\mathrm{dom}}
 =
-\max\nolimits^{(r)}
-\left\{
-h_1^{\mathrm{ROA}}(x),
-\ldots,
-h_p^{\mathrm{ROA}}(x)
-\right\},
-```
-
-where $\max^{(r)}$ denotes the $r$-th largest value among the $p$ candidate certificates.
-
-The combinatorial contingency condition is
-
-```math
-\widetilde{h}_r(x)\geq 0.
-```
-
-This condition holds if and only if at least $r$ candidate certificates are nonnegative. Equivalently, the state belongs to at least $r$ candidate CLF sublevel sets.
-
-The resulting combinatorial set is
-
-```math
-\mathcal{C}_r
-=
-\left\{
-x\in\mathbb{R}^{n}
-\mid
-\widetilde{h}_r(x)\geq 0
-\right\}.
-```
-
-Special cases include
-
-```math
-r=1
-\quad\Longrightarrow\quad
-\text{at least one candidate remains certified},
+\inf_{y\notin\mathcal D_k}V_k(y),
 ```
 
 and
 
 ```math
-r=p
-\quad\Longrightarrow\quad
-\text{all candidate regions must remain certified}.
-```
-
-### 7.2 Smooth combinatorial constraints
-
-Direct differentiation of the pivot is difficult because the identity of the $r$-th largest certificate can change as the state evolves. Instead of differentiating the nonsmooth order statistic directly, the controller imposes one smooth inequality for every candidate landing zone:
-
-```math
-\dot{h}_j^{\mathrm{ROA}}(x,u)
-\geq
--\alpha_c
-\left(
-h_j^{\mathrm{ROA}}(x)
-\right)
--
-\omega
-\rho
-\left(
-h_j^{\mathrm{ROA}}(x)
--
-\widetilde{h}_r(x)
-\right),
+c_k
+=
+\gamma
+\min
+\left\{
+c_k^{\mathrm{dyn}},
+c_k^{\mathrm{obs}},
+c_k^{\mathrm{dom}}
+\right\},
 \qquad
-j=1,\ldots,p.
+0<\gamma<1.
 ```
 
-The shared auxiliary variable satisfies
+The resulting certified cell is
 
 ```math
-\omega\geq 0.
-```
-
-Here:
-
-- $\alpha_c$ is an extended class-$\mathcal{K}$ function controlling the admissible decrease of each candidate certificate;
-- $\rho$ weights each certificate according to its position relative to the current pivot;
-- $\omega$ is shared by all candidate constraints and enables the smooth combinatorial composition.
-
-Candidates whose certificate values are close to the pivot determine whether the $r$-out-of-$p$ condition is maintained. Candidates far above the pivot remain comfortably certified, while candidates far below it do not determine the current contingency boundary.
-
-For the control-affine reduced-order dynamics
-
-```math
-\dot{x}
+\mathcal E_k
 =
-f(x)+g(x)u,
+\left\{
+x:
+V_k(x)\le c_k
+\right\},
+\qquad
+h_k(x)=c_k-V_k(x).
 ```
 
-the derivative of each attraction-region certificate is
+This construction makes the cell size depend on **control feasibility, obstacle contact, and model validity**, rather than on an arbitrary fixed radius.
+
+### 6.1 Geometric representation
+
+For visualization in position space, an ellipsoidal cell can be represented as
 
 ```math
-\dot{h}_j^{\mathrm{ROA}}(x,u)
+\mathcal F_k
 =
-\nabla h_j^{\mathrm{ROA}}(x)^{\mathsf{T}}
-\left(
-f(x)+g(x)u
-\right).
-```
-
-Because
-
-```math
-h_j^{\mathrm{ROA}}(x)
-=
-c_j-V_j(x),
-```
-
-its gradient is
-
-```math
-\nabla h_j^{\mathrm{ROA}}(x)
-=
--\nabla V_j(x).
-```
-
-For the quadratic CLF
-
-```math
-V_j(x)
-=
-\left(
-x-x_j^\star
-\right)^{\mathsf{T}}
-P_j
-\left(
-x-x_j^\star
-\right),
-```
-
-the gradient becomes
-
-```math
-\nabla V_j(x)
-=
-2P_j
-\left(
-x-x_j^\star
-\right),
-```
-
-and therefore
-
-```math
-\nabla h_j^{\mathrm{ROA}}(x)
-=
--2P_j
-\left(
-x-x_j^\star
-\right).
-```
-
-These expressions allow every combinatorial row to be written as an affine constraint in the control input whenever the system dynamics are control-affine.
-
-### 7.3 Target availability and state certification
-
-The implementation distinguishes between two different concepts:
-
-1. **Availability:** whether a landing zone has been declared operational by the mission logic.
-2. **Certification:** whether the current state satisfies the corresponding CLF sublevel certificate.
-
-A landing zone may be physically available but not certified from the current state. Conversely, a zone may have a positive CLF margin but be removed from consideration after an external failure declaration.
-
-The active contingency set is therefore determined using both logical availability and state-dependent certificate values.
-
-### 7.4 Target failure and safe retargeting
-
-When the active landing zone becomes unavailable, the target manager evaluates the remaining candidates and selects an alternative with a valid certificate and adequate contingency margin.
-
-The desired behavior is
-
-```text
-approach active landing zone
-→ detect landing-zone failure
-→ remove failed zone from the available set
-→ evaluate remaining CLF certificates
-→ select a certified alternative
-→ continue the safety-filtered approach
-```
-
-If fewer than $r$ available and certified alternatives remain, the requested contingency guarantee can no longer be maintained. The mission manager must then trigger a safe fallback mode instead of claiming that the original $r$-out-of-$p$ property still holds.
-
-<p align="center">
-  <img
-    src="docs/assets/readme/contingency_roa_maps.png"
-    alt="Candidate CLF attraction-region maps and the r-out-of-p contingency pivot"
-    width="900"
-  >
-</p>
-
-<p align="center">
-  <em>
-    Candidate CLF sublevel certificates and the corresponding
-    r-out-of-p contingency pivot evaluated over a spatial slice of
-    the full state space.
-  </em>
-</p>
-
-> **Interpretation of the spatial plots.** The complete CLF sublevel sets are defined in the full position–velocity state space. For the three-dimensional double-integrator model, the state space is six-dimensional. The spatial ellipses, ellipsoids, and maps shown above are fixed-velocity slices or projections and must not be interpreted as complete six-dimensional attraction regions.
-
-> **Current validation scope.** The implementation computes quadratic CLF sublevel certificates, evaluates their $r$-out-of-$p$ composition, and supports landing-zone invalidation and retargeting. A formal region-of-attraction claim additionally requires verifying that every selected sublevel set lies inside the domain where the local CLF decrease condition, input feasibility, model assumptions, and environmental safety constraints are jointly valid.
-
-**Implementation:** [`contingency_safety_box/src/contingency_safety_box/`](contingency_safety_box/src/contingency_safety_box/)
-
-## 8. Unified minimum-intervention filter
-
-All certificate packages use the affine convention
-
-$$
-Az\ge b.
-$$
-
-When environmental safety, landing stability, and contingency are active, the augmented decision is
-
-$$
-z=
-\begin{bmatrix}
-a\\ \omega\\ \delta_V
-\end{bmatrix}.
-$$
-
-The filter solves
-
-$$
-\begin{aligned}
-\min_{a,\omega,\delta_V}\quad
-&\frac12\|a-a_{\mathrm{nom}}\|_R^2
-+c_\omega\omega^2
-+p_V\delta_V^2\\
-\text{s.t.}\quad
-& a_{\min}\le a\le a_{\max},\\
-& \text{Poisson-HOCBF environmental row},\\
-& \text{active-target CLF row},\\
-& \text{combinatorial attraction-region rows},\\
-& \omega\ge0,\qquad \delta_V\ge0.
-\end{aligned}
-$$
-
-The returned solution is accepted only after independent residual verification. The runtime does not repair an infeasible result by clipping it after optimization.
-
-**Implementation:** `safety_filter_box/src/safety_filter_box/`.
-
----
-
-## 9. Safety-box contracts
-
-| Safety box | Input | Output | Scientific responsibility |
-|---|---|---|---|
-| `poisson_safety_box` | occupancy, spacing, forcing, solver | $h_P$, $Dh_P$, $D^2h_P$, residuals, timings | construct a differentiable environmental safety representation |
-| `cbf_safety_box` | state and local safety sample | affine CBF/HOCBF rows | convert the safety representation into dynamic constraints |
-| `clf_safety_box` | model, equilibria, LQR/CLF settings | $V_j$, $P_j$, $K_j$, $c_j$, CLF rows | stabilize landing equilibria and define candidate sublevel sets |
-| `contingency_safety_box` | differentiable candidate certificates, availability, $r$ | pivot, certified count, combinatorial rows, retarget status | preserve or assess multiple landing alternatives |
-| `safety_filter_box` | nominal decision, bounds, constraint bundles | verified `FilterResult` and $u_{\mathrm{safe}}$ | solve the unified minimum-intervention problem |
-| `safety_box_core` | shared typed objects | canonical contracts | prevent incompatible state and constraint representations |
-
-<details>
-<summary><strong>Key implementation files</strong></summary>
-
-| File | Responsibility |
-|---|---|
-| `poisson_safety_box/poisson_safety_box/matrix.py` | sparse finite-difference operator assembly |
-| `poisson_safety_box/poisson_safety_box/forcing.py` | forcing-field construction |
-| `poisson_safety_box/poisson_safety_box/solver.py` | direct, CG, and SOR backends |
-| `poisson_safety_box/poisson_safety_box/derivatives.py` | gradient, Hessian, and Laplacian diagnostics |
-| `cbf_safety_box/cbf_safety_box/api.py` | reusable CBF/HOCBF adapter |
-| `cbf_safety_box/cbf_safety_box/constraints/acceleration_hocbf.py` | relative-degree-two HOCBF |
-| `clf_safety_box/src/clf_safety_box/quadratic.py` | LQR, Lyapunov equation, and sublevel threshold |
-| `clf_safety_box/src/clf_safety_box/box.py` | multi-target CLF evaluation |
-| `contingency_safety_box/src/contingency_safety_box/box.py` | pivot, count, and combinatorial rows |
-| `contingency_safety_box/src/contingency_safety_box/policies.py` | target-selection policy |
-| `safety_filter_box/src/safety_filter_box/filter.py` | unified assembly, solve, and residual verification |
-| `experiments/common/controller.py` | runtime composition of independent boxes |
-| `experiments/common/simulation.py` | deterministic rollout and event logging |
-| `experiments/predefined_world/run_paper_suite.py` | controlled paper experiment matrix |
-
-</details>
-
----
-
-# Results
-
-## 10. Paper experiment matrix
-
-The paper suite separates three mission-level questions from the parameter studies.
-
-| Scenario | Scientific question | Expected terminal state |
-|---|---|---|
-| `baseline` | Can the system avoid terrain and complete the preferred landing? | `landed` at `LZ0` |
-| `single_failure` | Can the manager reject the active site, retarget, and complete a diverted landing? | `landed` at a backup site |
-| `sequential_failure` | Does the system detect that the configured $r$-out-of-$p$ requirement is exhausted? | contingency-exhaustion trigger |
-| parameter sweeps | How do HOCBF gain, CLF gain, ROA scale, forcing, and solver choice affect behavior and computation? | configuration-dependent |
-
-> The current sequential-failure rollout detects exhaustion and terminates immediately. It should not yet be interpreted as a validated physical hover/HOLD maneuver because the vehicle is not simulated until position and velocity converge to a hold equilibrium.
-
----
-
-## 11. Reference landing results
-
-### 11.1 Obstacle-rich primary landing
-
-The direct start-to-target segment intersects occupied geometry. The nominal planner constructs a clearance-aware reference, and the unified filter produces a safe terminal descent.
-
-<p align="center">
-  <img src="docs/assets/readme/baseline_landing.png" alt="Obstacle-rich baseline landing" width="930">
-</p>
-
-### 11.2 Terminal landing verification
-
-The terminal figure evaluates the landing conditions directly rather than inferring success from the final plotted marker.
-
-<p align="center">
-  <img src="docs/assets/readme/terminal_verification.png" alt="Terminal landing verification" width="900">
-</p>
-
-Reference deterministic run:
-
-| Metric | Baseline | Single failure |
-|---|---:|---:|
-| terminal status | `landed` | `landed` |
-| final target | `LZ0` | `LZ2` |
-| final position error | 0.227 m | 0.026 m |
-| final speed | 0.336 m/s | 0.328 m/s |
-| minimum obstacle clearance | 1.333 m | 0.966 m |
-| minimum Poisson value | 0.1368 | 0.0982 |
-| minimum HOCBF residual | 0.0498 | $-3.0\times10^{-11}$ |
-| target failures | 0 | 1 |
-| target switches | 0 | 1 |
-
-The small negative residual in the single-failure run is at numerical tolerance scale and is reported rather than hidden.
-
----
-
-## 12. Single-failure contingency result
-
-The active target is invalidated during approach. The target manager selects an available candidate with positive CLF-based margin, and the controller completes the redirected landing.
-
-<p align="center">
-  <img src="docs/assets/readme/single_failure_contingency.png" alt="Single failure contingency landing" width="930">
-</p>
-
-This result currently supports the claim that the runtime can perform **target invalidation, certified-margin assessment, retargeting, and diverted touchdown**. A stronger claim that the combinatorial rows actively preserved a nontrivial $r$-out-of-$p$ set requires a scenario in which the pivot approaches zero and the shared auxiliary variable $\omega$ becomes active.
-
----
-
-## 13. HOCBF gain sensitivity
-
-The HOCBF sweep evaluates the safety-performance tradeoff on the same obstacle world. Moderate gains produce successful landings, while overly conservative or aggressive configurations can terminate through residual or sampled-data collision checks.
-
-<p align="center">
-  <img src="docs/assets/readme/hocbf_alpha_sensitivity.png" alt="HOCBF alpha sensitivity" width="900">
-</p>
-
-Reported metrics include terminal status, duration, path length, clearance, minimum $h_P$, minimum HOCBF residual, intervention norm, terminal error, solve-time percentiles, and collision-guard backtracks.
-
----
-
-## 14. Poisson solver comparison
-
-The same discrete Dirichlet problem is solved with multiple numerical backends. The comparison separates speed from field and algebraic error.
-
-<p align="center">
-  <img src="docs/assets/readme/solver_comparison.png" alt="Poisson solver time and error comparison" width="880">
-</p>
-
-Reference single-run values:
-
-| Solver | Solve time | Algebraic residual | Relative field error |
-|---|---:|---:|---:|
-| sparse direct | 0.492 s | $1.14\times10^{-14}$ | reference |
-| conjugate gradient | 0.295 s | $8.14\times10^{-8}$ | $1.93\times10^{-8}$ |
-| SOR | 0.063 s | $1.10\times10^{-5}$ | $1.03\times10^{-6}$ |
-
-These are deterministic reference values, not statistical timing claims. Publication-grade benchmarking should add repeated trials, grid-resolution scaling, hardware metadata, and dispersion statistics.
-
----
-
-## 15. Cross-scenario comparison
-
-<p align="center">
-  <img src="docs/assets/readme/scenario_comparison.png" alt="Cross-scenario paper comparison" width="920">
-</p>
-
-The scenario comparison is intended as a summary figure. Claim-specific figures and CSV/JSON records remain the primary evidence.
-
----
-
-## 16. What the current suite demonstrates
-
-**Supported by the current deterministic experiments**
-
-- occupancy-to-Poisson safety construction in a nontrivial 3-D world;
-- numerical access to $h_P$, $Dh_P$, and $D^2h_P$;
-- HOCBF constraint evaluation and residual logging;
-- obstacle-rich preferred-site landing;
-- target invalidation followed by redirected landing;
-- solver time/error comparison;
-- HOCBF, CLF, and ROA parameter studies;
-- sub-millisecond pointwise safety-filter solve time in the reference configuration.
-
-**Not yet claimed**
-
-- full-order flight-dynamics safety;
-- PX4/SITL or hardware validation for this release;
-- robustness to state-estimation, map, delay, and aerodynamic uncertainty;
-- real-time recomputation of the full guidance-forcing Poisson field;
-- statistically validated success rates;
-- active preservation of a nontrivial $r$-out-of-$p$ boundary in the current reference scenario;
-- a physically stabilized hover/HOLD maneuver after contingency exhaustion.
-
-This distinction is part of the scientific interface of the repository: a successful software run is not automatically a formal or hardware-level guarantee.
-
-### Related experimental demonstrations
-
-The following media come from the broader Caltech research effort. They are included to show how the mathematical ideas were explored in simulation and hardware; they do **not** expand the formal guarantees of the deterministic reference suite above.
-
-<table>
-<tr>
-<td width="50%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-poisson.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/poisson-field.webp" width="100%" alt="Poisson safety-field experiment">
-</a><br><b>Poisson safety-field guidance</b><br><sub>Visualizes the field-based route construction used as one safety-guidance baseline.</sub>
-</td>
-<td width="50%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-method-comparison.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-route.webp" width="100%" alt="Poisson and funnel method comparison">
-</a><br><b>Poisson ↔ funnel comparison</b><br><sub>Compares route-generation behavior in the tested obstacle configuration.</sub>
-</td>
-</tr>
-<tr>
-<td width="50%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-dynamic-funnel.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/future-dynamic.webp" width="100%" alt="Dynamic obstacle funnel reconstruction">
-</a><br><b>Dynamic obstacle response</b><br><sub>Shows route/funnel reconstruction as obstacle geometry changes.</sub>
-</td>
-<td width="50%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/projects/caltech-obstacle-hardware.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-hardware.webp" width="100%" alt="Hardware obstacle-avoidance experiment">
-</a><br><b>Hardware experiment</b><br><sub>Physical experiment used to evaluate the safety-filtering workflow outside pure simulation.</sub>
-</td>
-</tr>
-</table>
-
-> Click any panel to open the associated MP4.
-
-
----
-
-## 17. Paper alignment
-
-| Paper section | Repository evidence |
-|---|---|
-| **Approach: model** | reduced-order dynamics and state/control definitions |
-| **Approach: environment** | occupancy, boundary, forcing, Poisson solution, derivatives |
-| **Approach: safety** | relative-degree-two HOCBF derivation and affine row |
-| **Approach: landing** | target-specific CLFs and candidate sublevel sets |
-| **Approach: contingency** | $r$-out-of-$p$ pivot, critical set, availability, and retarget policy |
-| **Approach: optimization** | unified minimum-intervention filter and residual verification |
-| **Results: landing** | baseline trajectory and terminal-condition verification |
-| **Results: diversion** | single-failure contingency timeline and redirected touchdown |
-| **Results: sensitivity** | HOCBF/CLF/ROA sweeps |
-| **Results: computation** | solver comparison and filter timing |
-| **Results: limitations** | explicit claim boundary and missing robustness studies |
-
-The detailed figure plan is in [`docs/PAPER_FIGURE_PLAN.md`](docs/PAPER_FIGURE_PLAN.md).
-
----
-
-## 18. Reproducibility
-
-### 18.1 Existing project environment
-
-```bash
-cd ~/ATMOS/Docker/workspace/Helicopter
-source .venv_boxes/bin/activate
-bash scripts/run_paper_experiments.sh
-```
-
-The script creates a timestamped directory under
-
-```text
-outputs/paper/mars_analog_suite_YYYYMMDD_HHMMSS/
+\left\{
+p:
+g_k(p)\ge0
+\right\},
 ```
 
 with
 
+```math
+g_k(p)
+=
+1
+-
+(p-c_k)^\mathsf{T}
+Q_k^{-1}
+(p-c_k).
+```
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-route.webp" width="820" alt="Overlapping ellipsoidal funnel route">
+</p>
+
+### 6.2 Connected corridor
+
+Neighboring cells must overlap:
+
+```math
+\mathcal E_k
+\cap
+\mathcal E_{k+1}
+\neq
+\varnothing.
+```
+
+Switching is restricted to a verified overlap/guard region. The route is therefore not a sequence of disconnected safe bubbles; it is a connected chain of locally certified regions.
+
+### 6.3 Directed growth and branching
+
+The route grows toward mission-relevant directions while stopping at dynamic, obstacle, or domain limits. A directional branch selection can be written schematically as
+
+```math
+d_i^\star
+\in
+\operatorname*{arg\,max}_{d_i}
+d_i^\mathsf{T}d_g,
+```
+
+subject to the local viability, collision-free containment, overlap, handoff, and input-feasibility conditions.
+
+This is closely related to ideas from LQR-Trees, invariant funnel libraries, obstacle-free convex-region inflation, and sequential composition. The research contribution under study is the **specific coupling** of CLF-valid level sets, obstacle-clipped growth, directed branching, verified handoff, and contingency preservation—not the individual concepts in isolation.
+
+---
+
+## 7. r-out-of-p contingency
+
+For `p` candidate landing zones, define the order-statistic pivot
+
+```math
+\widetilde h_r(x)
+=
+\max^{(r)}
+\left\{
+h_1^{\mathrm{ROA}}(x),
+\ldots,
+h_p^{\mathrm{ROA}}(x)
+\right\},
+```
+
+where `max^(r)` denotes the r-th largest certificate value.
+
+The contingency condition is
+
+```math
+\widetilde h_r(x)\ge0.
+```
+
+Equivalently,
+
+```math
+\widetilde h_r(x)\ge0
+\quad\Longleftrightarrow\quad
+\#\left\{
+j:
+h_j^{\mathrm{ROA}}(x)\ge0
+\right\}
+\ge r.
+```
+
+Thus:
+
+- `r = 1`: at least one landing alternative remains certified;
+- `r = p`: all alternatives must remain certified;
+- intermediate `r`: preserve a required number of alternatives without enforcing every candidate simultaneously.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/contingency-multigoal.webp" width="820" alt="Multiple contingency landing alternatives">
+</p>
+
+The implementation distinguishes **availability** from **certification**. A site may remain physically available but not be reachable from the current certified state; conversely, a positive CLF margin is ignored if mission logic has declared the site unavailable.
+
+---
+
+## 8. Minimum-intervention safety filter
+
+The control layer is organized as a constrained projection around the nominal command. A schematic form is
+
+```math
+\min_{u,\delta_V}
+\frac{1}{2}
+\left\|
+u-u_{\mathrm{nom}}
+\right\|_W^2
++
+\rho_V\delta_V^2,
+```
+
+subject to the active environmental HOCBF, CLF, contingency, actuator, and workspace constraints.
+
+Safety and contingency rows are treated as hard constraints in the reference formulation; the CLF can use an explicitly penalized relaxation when required.
+
+---
+
+## 9. Experimental evidence
+
+### Poisson-field hardware experiment
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-poisson.mp4">
+    <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/poisson-field.webp" width="760" alt="Poisson safety-field hardware experiment">
+  </a>
+</p>
+
+### Poisson ↔ funnel comparison
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-method-comparison.mp4">
+    <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-hardware.webp" width="760" alt="Poisson and funnel comparison">
+  </a>
+</p>
+
+### Dynamic-obstacle funnel reconstruction
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-dynamic-funnel.mp4">
+    <img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/future-dynamic.webp" width="760" alt="Dynamic funnel reconstruction">
+  </a>
+</p>
+
+### Contingency switching
+
+<p align="center">
+  <a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-contingency.mp4">
+    <img src="docs/assets/readme/single_failure_contingency.png" width="760" alt="Single-failure contingency experiment">
+  </a>
+</p>
+
+> Click a figure to open the associated MP4. These videos are experimental evidence of the implementation behavior; they are not substitutes for the formal assumptions required by the reduced-order certificates.
+
+---
+
+## 10. Validation hierarchy
+
+The repository separates evidence into distinct levels:
+
+| Level | Question |
+|---|---|
+| **Analytical** | Is the mathematical constraint derived correctly under its stated assumptions? |
+| **Numerical** | Does the discretized / interpolated implementation preserve the intended residuals and signs? |
+| **Closed-loop simulation** | Do sampled trajectories satisfy the implemented certificates? |
+| **Fine-substep validation** | Are violations observed between controller samples under the numerical hold model? |
+| **Hardware experiment** | Does the physical system reproduce the intended behavior under the tested setup? |
+| **Full-order guarantee** | Can tracking, estimation, delays, perception, and low-level dynamics be bounded tightly enough to lift the reduced-order certificate to the physical vehicle? |
+
+The last level is **not** implied by success at the earlier levels.
+
+---
+
+## 11. Repository organization
+
 ```text
-00_cross_scenario_figures/
-01_baseline/
-02_single_failure/
-03_sequential_failure/
-04_parameter_sweeps/
-PAPER_FIGURE_INDEX.md
-paper_scenario_summary.csv
-paper_scenario_summary.json
+poisson_safety_box/       occupancy → Poisson field → derivatives
+cbf_safety_box/           HOCBF / CBF affine constraints
+clf_safety_box/           CLFs, landing equilibria, candidate ROAs
+contingency_safety_box/   r-out-of-p availability / certification logic
+safety_filter_box/        minimum-intervention constrained control
+safety_box_core/          shared interfaces and data contracts
+experiments/              deterministic scenarios and validation
+configs/                  experiment and model configuration
+tests/                    unit / integration / scientific regression tests
+docs/                     mathematical and validation documentation
 ```
 
-### 18.2 Fast end-to-end smoke run
+---
+
+## 12. Reproducing the reference studies
+
+Install dependencies:
 
 ```bash
-bash scripts/run_paper_experiments.sh \
-  --profile smoke \
-  --skip-comparisons \
-  --skip-sweeps
-```
-
-### 18.3 Fresh local environment named `.venv_boxes`
-
-```bash
-python3 -m venv .venv_boxes
-source .venv_boxes/bin/activate
-python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
-
-for package in \
-  safety_box_core \
-  safety_filter_box \
-  clf_safety_box \
-  contingency_safety_box \
-  poisson_safety_box \
-  cbf_safety_box \
-  vision_poisson_experiments
-do
-  python -m pip install -e "./${package}"
-done
 ```
 
-### 18.4 Project-only tests
-
-On ROS 2 systems, disable unrelated auto-loaded pytest plugins when validating only this repository:
+Run the integrated landing study:
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-python -m pytest tests -v
+python run_poisson_cbf_contingency_landing_study.py
 ```
 
----
+Run the repository checks:
 
-## 19. Repository structure
-
-```text
-Helicopter/
-├── configs/
-│   ├── experiment.yaml
-│   └── worlds/mars_analog_landing.yaml
-├── experiments/
-│   ├── common/
-│   ├── predefined_world/
-│   ├── static_image/
-│   └── live_vision/
-├── poisson_safety_box/
-├── cbf_safety_box/
-├── clf_safety_box/
-├── contingency_safety_box/
-├── safety_filter_box/
-├── safety_box_core/
-├── vision_poisson_experiments/
-├── scripts/
-├── tests/
-├── docs/
-├── outputs/
-└── legacy/hjr/
+```bash
+pytest -q
 ```
 
-Further documentation:
-
-- [`docs/SCIENTIFIC_WORKFLOW.md`](docs/SCIENTIFIC_WORKFLOW.md): equation-by-equation pipeline;
-- [`docs/EQUATION_TO_CODE_MAP.md`](docs/EQUATION_TO_CODE_MAP.md): mathematical object to implementation mapping;
-- [`docs/FILE_GUIDE.md`](docs/FILE_GUIDE.md): file responsibilities;
-- [`docs/MARS_ANALOG_SCENARIO_DESIGN.md`](docs/MARS_ANALOG_SCENARIO_DESIGN.md): world geometry and scenario rationale;
-- [`docs/PAPER_FIGURE_PLAN.md`](docs/PAPER_FIGURE_PLAN.md): Approach and Results figure plan;
-- [`docs/SAFETY_SCOPE.md`](docs/SAFETY_SCOPE.md): guarantee and non-guarantee boundary;
-- [`docs/MIGRATION_FROM_HJR.md`](docs/MIGRATION_FROM_HJR.md): active CLF-based formulation versus archived HJR code.
+Because the project is still evolving, any reported test count or timing should be tied to a specific commit, environment, and benchmark configuration.
 
 ---
 
-## 20. Design principles
+## 13. Primary references
 
-1. **One mathematical responsibility per box.**
-2. **Shared typed contracts instead of experiment-specific data structures.**
-3. **Hard environmental and contingency constraints; explicit stability relaxation.**
-4. **Independent residual verification after every optimization solve.**
-5. **The same geometry source for visualization and occupancy.**
-6. **Deterministic configurations, logged metadata, and machine-readable results.**
-7. **No safety claim beyond the validated model and experiment scope.**
-
----
-
-## 21. Citation
-
-Use [`CITATION.cff`](CITATION.cff) for repository citation. The theoretical sources and the mapping from external results to implemented components are documented in [`docs/THEORY_REFERENCES.md`](docs/THEORY_REFERENCES.md).
+1. A. D. Ames, X. Xu, J. W. Grizzle, and P. Tabuada, **Control Barrier Function Based Quadratic Programs for Safety Critical Systems**, IEEE TAC, 2017.
+2. A. D. Ames et al., **Control Barrier Functions: Theory and Applications**, ECC, 2019.
+3. W. Xiao and C. Belta, **High-Order Control Barrier Functions**, IEEE TAC, 2022.
+4. G. Bahati, R. M. Bena, and A. D. Ames, **Dynamic Safety in Complex Environments: Synthesizing Safety Filters with Poisson's Equation**, 2025.
+5. R. Tedrake et al., **LQR-Trees: Feedback Motion Planning on Sparse Randomized Trees**, RSS, 2009.
+6. M. Tobenkin, I. Manchester, and R. Tedrake, **Invariant Funnels Around Trajectories Using Sum-of-Squares Programming**, 2011.
+7. A. Majumdar and R. Tedrake, **Funnel Libraries for Real-Time Robust Feedback Motion Planning**, IJRR, 2017.
+8. P. Ong et al., **Combinatorial Control Barrier Functions: Nested Boolean and p-Choose-r Compositions of Safety Constraints**, 2025.
+9. Y. Lishkova et al., **Steering with Contingencies: Combinatorial Stabilization and Reach-Avoid Filters**, 2026.
+10. D. Q. Mayne et al., **Constrained Model Predictive Control: Stability and Optimality**, Automatica, 2000.
 
 ---
 
-## 22. License and research status
+## Scientific status
 
-This repository is a research prototype. Review the license files, dependency licenses, and [`docs/SAFETY_SCOPE.md`](docs/SAFETY_SCOPE.md) before reuse in safety-critical or flight applications.
+The repository supports a modular and testable safety/contingency architecture and includes simulation plus Crazyflie experiments. The **ellipsoidal funnel construction is still under formal validation** as a certified safety-and-contingency mechanism, especially when numerical interpolation, sampled-data execution, changing obstacles, sensing degradation, and full-order flight dynamics are included.
