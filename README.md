@@ -57,11 +57,7 @@ Each block has a different role: the MPC is task-seeking, the HOCBF is safety-pr
 The translational state is
 
 ```math
-x =
-\begin{bmatrix}
-p \\
-v
-\end{bmatrix}
+x = [p^T\; v^T]^T
 ```
 
 with dynamics
@@ -278,13 +274,7 @@ The final certified level is
 
 ```math
 c_k=
-\beta
-\min
-\left(
-c_k^{dyn},
-c_k^{obs},
-c_k^{dom}
-\right),
+\beta\,\min(c_k^{dyn},c_k^{obs},c_k^{dom}),
 \qquad 0<\beta<1.
 ```
 
