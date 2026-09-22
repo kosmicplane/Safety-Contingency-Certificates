@@ -10,11 +10,11 @@
 
 ## Overview
 
-This repository studies a specific autonomy problem:
+The project addresses a specific autonomy problem:
 
 > **How can an aerial vehicle continue toward a landing objective while preserving safety and multiple viable alternatives when the environment or mission state changes?**
 
-The method is intentionally layered:
+The control architecture is organized in seven layers:
 
 1. a **nominal controller** proposes the task command;
 2. a **Poisson-derived safety field** represents obstacle proximity;
@@ -24,7 +24,7 @@ The method is intentionally layered:
 6. an **r-out-of-p contingency condition** tracks whether enough alternatives remain viable;
 7. a minimum-intervention optimization modifies the nominal command only when required.
 
-The objective is not merely collision avoidance. The autonomy stack should retain useful options and react coherently when obstacles move, landing zones become unavailable, or the nominal route loses viability.
+The goal is to preserve safety without reducing the mission to a single brittle route: the controller should retain viable alternatives and react coherently when obstacles move, landing zones become unavailable, or the nominal route loses viability.
 
 ---
 
@@ -74,7 +74,7 @@ and
 
 The control input `u` is interpreted as commanded translational acceleration in the reduced-order model used by the safety layer.
 
-This abstraction is useful for certificate construction, but the physical vehicle additionally contains attitude dynamics, low-level tracking, sensing, delays, and actuator limits. Those effects are treated as a separate validation layer rather than silently absorbed into the reduced-order model.
+The reduced-order model is used for certificate construction. Attitude dynamics, low-level tracking, sensing, delays, and actuator limits are evaluated separately when the controller is transferred to the physical vehicle.
 
 ---
 
@@ -129,7 +129,7 @@ The numerical implementation evaluates:
   <img src="docs/assets/readme/poisson_construction.png" alt="Poisson field construction" width="850">
 </p>
 
-The important distinction is between the **continuous PDE object** and the **sampled/interpolated numerical field**. The latter must be checked numerically before it is used inside a safety constraint.
+The continuous PDE and its sampled/interpolated numerical realization are treated as distinct objects. Residual, interpolation, and derivative checks are therefore part of the numerical validation before the field enters the safety constraint.
 
 ---
 
@@ -238,7 +238,7 @@ The allowed level is limited by three quantities:
 - `c_k_obs`: largest level before obstacle contact;
 - `c_k_dom`: largest level contained inside the local model/domain.
 
-Instead of placing all quantifiers inside one fragile expression, the dynamic condition is stated explicitly:
+The dynamic limit is defined by the largest level for which the local Lyapunov condition remains feasible:
 
 ```math
 c_k^{dyn}=\sup_{c>0} c
@@ -315,7 +315,7 @@ The branch with the largest admissible score is preferred, subject to:
 - feasible handoff;
 - actuator/input limits.
 
-This keeps the mathematical idea clear without introducing notation that obscures the implementation.
+The selected branch must remain feasible with respect to local control authority, collision-free containment, overlap, and handoff.
 
 ### 7.3 Dynamic reconstruction
 
@@ -401,9 +401,7 @@ These experiments are tied directly to the corresponding theoretical component r
   </a>
 </p>
 
-**What it tests:** two different safety representations acting on the same physical vehicle/obstacle problem.
-
-**What it demonstrates:** the qualitative difference between field-based Poisson guidance and corridor/funnel-based route construction on hardware.
+The experiment compares field-based Poisson guidance with corridor/funnel-based route construction on the same physical vehicle and obstacle layout.
 
 ---
 
@@ -415,9 +413,7 @@ These experiments are tied directly to the corresponding theoretical component r
   </a>
 </p>
 
-**What it tests:** whether the controller can continue operating while maintaining multiple landing alternatives instead of committing immediately to a single target.
-
-**Theory connection:** the experiment corresponds to the r-out-of-p contingency logic described in Section 8.
+The experiment evaluates whether the controller can continue operating while preserving multiple landing alternatives, directly exercising the r-out-of-p logic from Section 8.
 
 ---
 
@@ -429,9 +425,7 @@ These experiments are tied directly to the corresponding theoretical component r
   </a>
 </p>
 
-**What it tests:** online invalidation and reconstruction of the corridor when obstacle geometry changes.
-
-**Theory connection:** this is the dynamic version of the overlap/growth mechanism described in Section 7.
+The experiment evaluates online invalidation and reconstruction of the corridor as obstacle geometry changes, exercising the overlap and growth mechanism described in Section 7.
 
 ---
 
@@ -443,9 +437,7 @@ These experiments are tied directly to the corresponding theoretical component r
   </a>
 </p>
 
-**What it tests:** real-time interaction among local reachability certificates, funnel construction, and contingency preservation.
-
-**Interpretation:** this experiment is the closest representation of the complete research concept, but it should still be read as implementation evidence rather than a proof of full-order closed-loop guarantees.
+This experiment combines local reachability certificates, funnel construction, and contingency preservation in real time. It demonstrates the integrated implementation under the tested conditions.
 
 ---
 
@@ -522,6 +514,6 @@ Any timing result should be interpreted together with the exact commit, machine,
 
 ---
 
-## Research status
+## Validation scope
 
-The repository contains a working modular implementation and hardware demonstrations. The **ellipsoidal funnel / contingency integration remains under formal theoretical validation**, particularly when moving obstacles, sensing uncertainty, sampled-data execution, tracking error, and full-order flight dynamics are included.
+The mathematical guarantees documented here apply to the stated reduced-order assumptions and numerical implementation. Hardware experiments evaluate the integrated behavior under the tested conditions, while full-order flight effects such as tracking error, delays, sensing uncertainty, and low-level dynamics are treated explicitly as separate sources of uncertainty.
