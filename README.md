@@ -85,11 +85,11 @@ The nominal controller solves a finite-horizon tracking problem of the form
 ```math
 J =
 \sum_{k=0}^{N-1}
-\left[
+[
 (x_k-x_k^{ref})^T Q (x_k-x_k^{ref})
 +
 (u_k-u_k^{ref})^T R (u_k-u_k^{ref})
-\right]
+]
 +
 (x_N-x_N^{ref})^T Q_f (x_N-x_N^{ref}).
 ```
