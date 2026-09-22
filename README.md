@@ -1,4 +1,4 @@
-# Mars-Analog Helicopter Landing Safety Boxes
+# Safety & Contingency Certificates for Autonomous Landing
 
 <p align="center">
   <strong>Poisson safety fields · HOCBF collision avoidance · CLF landing stabilization · multi-zone contingency · verified minimum-intervention filtering</strong>
@@ -14,32 +14,9 @@
 
 > **Current scope.** The paper experiments use deterministic three-dimensional single- and double-integrator models with known state, static occupancy, and ideal low-level command tracking. The repository does **not** yet claim full-order PX4, estimator, hardware, uncertain-terrain, or Martian-aerodynamics guarantees.
 
-## Visual experiments from the broader research effort
+## Research context
 
-The repository contains the mathematical and software framework. The following demonstrations provide visual context for the broader Caltech research effort; they are **experimental demonstrations, not additional formal guarantees of this repository**.
-
-<table>
-<tr>
-<td width="33%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-method-comparison.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-route.webp" width="100%" alt="Poisson and funnel method comparison">
-</a><br><b>Poisson ↔ funnel comparison</b><br><sub>Route-generation behavior under the tested obstacle configuration.</sub>
-</td>
-<td width="33%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-dynamic-funnel.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/future-dynamic.webp" width="100%" alt="Dynamic obstacle funnel reconstruction">
-</a><br><b>Dynamic obstacle response</b><br><sub>Funnel structure reconstructed as obstacle geometry changes.</sub>
-</td>
-<td width="33%" align="center">
-<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/projects/caltech-funnel-hardware.mp4">
-<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-hardware.webp" width="100%" alt="Hardware experiment">
-</a><br><b>Hardware experiment</b><br><sub>Physical validation context for the safety-filtering workflow.</sub>
-</td>
-</tr>
-</table>
-
-> Click any panel to open the corresponding MP4 demonstration.
-
+The repository contains the formal reduced-order safety and contingency framework used in the current paper experiments. Related hardware and dynamic-environment demonstrations are presented later as **experimental context**, separately from the guarantees supported by the deterministic software suite.
 
 ---
 
@@ -737,6 +714,40 @@ The scenario comparison is intended as a summary figure. Claim-specific figures 
 - a physically stabilized hover/HOLD maneuver after contingency exhaustion.
 
 This distinction is part of the scientific interface of the repository: a successful software run is not automatically a formal or hardware-level guarantee.
+
+### Related experimental demonstrations
+
+The following media come from the broader Caltech research effort. They are included to show how the mathematical ideas were explored in simulation and hardware; they do **not** expand the formal guarantees of the deterministic reference suite above.
+
+<table>
+<tr>
+<td width="50%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-poisson.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/poisson-field.webp" width="100%" alt="Poisson safety-field experiment">
+</a><br><b>Poisson safety-field guidance</b><br><sub>Visualizes the field-based route construction used as one safety-guidance baseline.</sub>
+</td>
+<td width="50%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-method-comparison.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-route.webp" width="100%" alt="Poisson and funnel method comparison">
+</a><br><b>Poisson ↔ funnel comparison</b><br><sub>Compares route-generation behavior in the tested obstacle configuration.</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-dynamic-funnel.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/future-dynamic.webp" width="100%" alt="Dynamic obstacle funnel reconstruction">
+</a><br><b>Dynamic obstacle response</b><br><sub>Shows route/funnel reconstruction as obstacle geometry changes.</sub>
+</td>
+<td width="50%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/projects/caltech-obstacle-hardware.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-hardware.webp" width="100%" alt="Hardware obstacle-avoidance experiment">
+</a><br><b>Hardware experiment</b><br><sub>Physical experiment used to evaluate the safety-filtering workflow outside pure simulation.</sub>
+</td>
+</tr>
+</table>
+
+> Click any panel to open the associated MP4.
+
 
 ---
 
