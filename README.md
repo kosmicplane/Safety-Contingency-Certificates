@@ -14,6 +14,33 @@
 
 > **Current scope.** The paper experiments use deterministic three-dimensional single- and double-integrator models with known state, static occupancy, and ideal low-level command tracking. The repository does **not** yet claim full-order PX4, estimator, hardware, uncertain-terrain, or Martian-aerodynamics guarantees.
 
+## Visual experiments from the broader research effort
+
+The repository contains the mathematical and software framework. The following demonstrations provide visual context for the broader Caltech research effort; they are **experimental demonstrations, not additional formal guarantees of this repository**.
+
+<table>
+<tr>
+<td width="33%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-method-comparison.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-route.webp" width="100%" alt="Poisson and funnel method comparison">
+</a><br><b>Poisson ↔ funnel comparison</b><br><sub>Route-generation behavior under the tested obstacle configuration.</sub>
+</td>
+<td width="33%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/caltech-dynamic-funnel.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/future-dynamic.webp" width="100%" alt="Dynamic obstacle funnel reconstruction">
+</a><br><b>Dynamic obstacle response</b><br><sub>Funnel structure reconstructed as obstacle geometry changes.</sub>
+</td>
+<td width="33%" align="center">
+<a href="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/media/projects/caltech-funnel-hardware.mp4">
+<img src="https://raw.githubusercontent.com/kosmicplane/kosmicplane.github.io/main/assets/images/research/caltech/funnel-hardware.webp" width="100%" alt="Hardware experiment">
+</a><br><b>Hardware experiment</b><br><sub>Physical validation context for the safety-filtering workflow.</sub>
+</td>
+</tr>
+</table>
+
+> Click any panel to open the corresponding MP4 demonstration.
+
+
 ---
 
 ## 1. Research objective
